@@ -1,0 +1,39 @@
+spec_version: 1
+name: dhara_ai
+description: >-
+  Dhara AI (धारा) — An RL environment for training AI agents to review,
+  flag, and negotiate legal contract clauses. Simulates NDA, SaaS, and
+  Joint Venture agreement reviews with multi-turn counterparty
+  negotiation.
+type: space
+runtime: fastapi
+app: server.app:app
+port: 7860
+
+tasks:
+  - id: nda
+    name: NDA Review (Easy)
+    description: >-
+      5-clause Non-Disclosure Agreement between an Indian SaaS startup
+      (Disclosing Party) and a vendor. Agent must identify 3 issue
+      clauses, propose fixes that satisfy client requirements (broad
+      definition, 3-year max duration, Indian jurisdiction), and
+      correctly accept 2 clean clauses. No counterparty pushback.
+      Max steps: 15.
+  - id: saas
+    name: SaaS Service Agreement (Medium)
+    description: >-
+      7-clause SaaS Service Agreement between a healthtech company and
+      a cloud provider. Agent must identify 4 issue clauses, propose
+      fixes (data protection carve-out, 30-day deletion + certification,
+      99.5% SLA with credits, India-only data residency), and handle
+      3 rounds of light counterparty pushback. Max steps: 25.
+  - id: jv
+    name: Joint Venture Agreement (Hard)
+    description: >-
+      10-clause Technology Joint Venture Agreement between a 49%-stake
+      Indian IT firm and a US tech partner. Agent must identify 6 issue
+      clauses (IP ownership, right of first refusal, deadlock+buyout,
+      non-compete, board seats, exit valuation), handle 6 rounds of
+      aggressive counterparty pushback, and reason across interacting
+      clauses (deadlock/board, exit/valuation). Max steps: 35.
