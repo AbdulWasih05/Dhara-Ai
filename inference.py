@@ -67,9 +67,12 @@ except ModuleNotFoundError:  # pragma: no cover -- invoked as `python inference.
 # Config
 # ---------------------------------------------------------------------------
 
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
+# CRITICAL FIX: Use platform-injected environment variables without defaults
+# The hackathon validator requires these specific variables to route through
+# the LiteLLM proxy. Do NOT use fallback values.
+API_BASE_URL = os.environ.get("API_BASE_URL")
+API_KEY = os.environ.get("API_KEY")  # Changed from HF_TOKEN to API_KEY
 MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
-HF_TOKEN = os.environ.get("HF_TOKEN")
 IMAGE_NAME = os.environ.get("IMAGE_NAME", "").strip()
 SPACE_URL = os.environ.get("SPACE_URL", "http://127.0.0.1:7860").strip()
 
@@ -423,21 +426,22 @@ async def _run_task(task_name: str, llm: OpenAI) -> None:
 
 
 async def _amain() -> None:
-    if not HF_TOKEN:
+    # CRITICAL FIX: Check for API_KEY instead of HF_TOKEN (platform-injected variable)
+    if not API_KEY or not API_BASE_URL:
         # Emit a fake [START]/[END] for each task so the harness still
         # sees the required markers, then exit.
         for task in TASKS:
             _log(f"[START] task={task} env=dhara_ai model={MODEL_NAME}")
             _log(
                 "[STEP]  step=1 action=NONE reward=0.00 done=true "
-                "error=HF_TOKEN environment variable is not set"
+                "error=API_KEY or API_BASE_URL environment variables are not set"
             )
             _log(
                 "[END]   success=false steps=0 score=0.00 rewards="
             )
         return
 
-    llm = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+    llm = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
     for task_name in TASKS:
         await _run_task(task_name, llm)
 
