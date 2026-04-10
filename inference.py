@@ -73,6 +73,13 @@ HF_TOKEN = os.environ.get("HF_TOKEN")
 IMAGE_NAME = os.environ.get("IMAGE_NAME", "").strip()
 SPACE_URL = os.environ.get("SPACE_URL", "http://127.0.0.1:7860").strip()
 
+# Startup config logging (stderr — does not affect stdout parsing)
+print(f"[CONFIG] API_BASE_URL={API_BASE_URL}", file=sys.stderr)
+print(f"[CONFIG] MODEL_NAME={MODEL_NAME}", file=sys.stderr)
+print(f"[CONFIG] HF_TOKEN_present={HF_TOKEN is not None}", file=sys.stderr)
+print(f"[CONFIG] IMAGE_NAME={IMAGE_NAME!r}", file=sys.stderr)
+print(f"[CONFIG] SPACE_URL={SPACE_URL}", file=sys.stderr)
+
 TASKS: List[str] = ["nda", "saas", "jv"]
 
 # Upper bound on iterations as a safety net. The environment enforces
@@ -256,9 +263,13 @@ def _make_env() -> DharaAiEnv:
     to it. Otherwise connect to an already-running server at SPACE_URL
     (HF Space, or a local dev server).
     """
+    print(f"[ENV] connecting via image_name={IMAGE_NAME!r} space_url={SPACE_URL!r}", file=sys.stderr, flush=True)
     if IMAGE_NAME:
-        return DharaAiEnv.from_docker_image(IMAGE_NAME)
-    return DharaAiEnv(base_url=SPACE_URL)
+        env = DharaAiEnv.from_docker_image(IMAGE_NAME)
+    else:
+        env = DharaAiEnv(base_url=SPACE_URL)
+    print(f"[ENV] client created", file=sys.stderr, flush=True)
+    return env
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +294,7 @@ def _chat(
             time.sleep(_MIN_CALL_INTERVAL - elapsed)
 
         _last_call_time = time.time()
+        print(f"[LLM_CALL] attempt={attempt+1} model={model} base_url={llm.base_url}", file=sys.stderr, flush=True)
         try:
             response = llm.chat.completions.create(
                 model=model,
@@ -293,8 +305,10 @@ def _chat(
                     {"role": "user", "content": user_message},
                 ],
             )
+            print(f"[LLM_CALL_OK] attempt={attempt+1}", file=sys.stderr, flush=True)
             return response.choices[0].message.content or ""
         except Exception as exc:
+            print(f"[LLM_CALL_FAIL] attempt={attempt+1} type={type(exc).__name__} msg={str(exc)[:200]}", file=sys.stderr, flush=True)
             err_str = str(exc)
             if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
                 match = re.search(r"retry in ([\d.]+)s", err_str, re.IGNORECASE)
@@ -326,8 +340,10 @@ async def _run_task(task_name: str, llm: OpenAI) -> None:
 
     try:
         async with env:
+            print(f"[ENV_RESET] task={task_name}", file=sys.stderr, flush=True)
             result = await env.reset(task_name=task_name)
             observation = result.observation
+            print(f"[ENV_RESET_OK] task={task_name} clauses={len(observation.clauses)}", file=sys.stderr, flush=True)
             system_prompt = _build_system_prompt(observation)
 
             while step_n < MAX_ITERATIONS_PER_TASK:
@@ -344,6 +360,7 @@ async def _run_task(task_name: str, llm: OpenAI) -> None:
                         llm, MODEL_NAME, system_prompt, user_message
                     )
                 except Exception as exc:
+                    print(f"[EXCEPT] location=run_task_llm_call task={task_name} step={step_n+1} type={type(exc).__name__} msg={str(exc)[:200]}", file=sys.stderr, flush=True)
                     step_n += 1
                     reason = f"llm_error: {exc}"
                     rewards.append(0.0)
@@ -355,8 +372,8 @@ async def _run_task(task_name: str, llm: OpenAI) -> None:
                         result = await env.step(
                             DharaAiAction(action_type="submit_review")
                         )
-                    except Exception:
-                        pass
+                    except Exception as e2:
+                        print(f"[EXCEPT] location=fallback_submit task={task_name} type={type(e2).__name__} msg={str(e2)[:200]}", file=sys.stderr, flush=True)
                     final_done = True
                     break
 
@@ -366,8 +383,10 @@ async def _run_task(task_name: str, llm: OpenAI) -> None:
                     parsed = DharaAiAction(action_type="submit_review")
 
                 step_n += 1
+                print(f"[ENV_STEP] task={task_name} step={step_n} action={_action_str(parsed)}", file=sys.stderr, flush=True)
                 result = await env.step(parsed)
                 reward = float(result.reward or 0.0)
+                print(f"[ENV_STEP_OK] task={task_name} step={step_n} reward={reward:.2f} done={result.done}", file=sys.stderr, flush=True)
                 rewards.append(reward)
                 observation = result.observation
 
@@ -383,6 +402,7 @@ async def _run_task(task_name: str, llm: OpenAI) -> None:
                     final_done = True
                     break
     except Exception as exc:
+        print(f"[EXCEPT] location=run_task_outer task={task_name} type={type(exc).__name__} msg={str(exc)[:200]}", file=sys.stderr, flush=True)
         # Defensive: never crash without emitting [END].
         _log(
             f"[STEP]  step={step_n + 1} action=ERROR reward=0.00 done=true "
