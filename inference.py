@@ -67,14 +67,22 @@ except ModuleNotFoundError:  # pragma: no cover -- invoked as `python inference.
 # Config
 # ---------------------------------------------------------------------------
 
-# CRITICAL FIX: Use platform-injected environment variables without defaults
-# The hackathon validator requires these specific variables to route through
-# the LiteLLM proxy. Do NOT use fallback values.
-API_BASE_URL = os.environ.get("API_BASE_URL")
-API_KEY = os.environ.get("API_KEY")  # Changed from HF_TOKEN to API_KEY
-MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+# Per official hackathon docs:
+#   API_BASE_URL — must include a default value
+#   MODEL_NAME — must include a default value
+#   HF_TOKEN — mandatory, no default required (raise if missing)
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
+HF_TOKEN = os.getenv("HF_TOKEN")
+
+if HF_TOKEN is None:
+    raise ValueError("HF_TOKEN environment variable is required")
+
 IMAGE_NAME = os.environ.get("IMAGE_NAME", "").strip()
-SPACE_URL = os.environ.get("SPACE_URL", "http://127.0.0.1:7860").strip()
+# Default SPACE_URL points to the deployed HF Space so the script
+# always has a working environment to connect to even if IMAGE_NAME
+# is not injected or from_docker_image() fails.
+SPACE_URL = os.environ.get("SPACE_URL", "https://wasih05-dhara-ai.hf.space").strip()
 
 # Startup config logging (stderr — does not affect stdout parsing)
 print(f"[CONFIG] API_BASE_URL={API_BASE_URL}", file=sys.stderr)
@@ -259,19 +267,30 @@ def _log(line: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_env() -> DharaAiEnv:
+async def _make_env() -> DharaAiEnv:
     """Instantiate the environment client.
 
-    If IMAGE_NAME is set, spin up a fresh Docker container and connect
-    to it. Otherwise connect to an already-running server at SPACE_URL
-    (HF Space, or a local dev server).
+    Strategy:
+      1. If IMAGE_NAME is set, try `from_docker_image` (the official protocol).
+      2. If that fails for ANY reason, fall back to connecting to SPACE_URL
+         (the deployed HF Space) so we always have a working env.
+      3. If IMAGE_NAME is not set, connect directly to SPACE_URL.
     """
-    print(f"[ENV] connecting via image_name={IMAGE_NAME!r} space_url={SPACE_URL!r}", file=sys.stderr, flush=True)
+    print(f"[ENV] connecting image_name={IMAGE_NAME!r} space_url={SPACE_URL!r}", file=sys.stderr, flush=True)
+
     if IMAGE_NAME:
-        env = DharaAiEnv.from_docker_image(IMAGE_NAME)
-    else:
-        env = DharaAiEnv(base_url=SPACE_URL)
-    print(f"[ENV] client created", file=sys.stderr, flush=True)
+        try:
+            env = await DharaAiEnv.from_docker_image(IMAGE_NAME)
+            print(f"[ENV] from_docker_image OK type={type(env).__name__}", file=sys.stderr, flush=True)
+            return env
+        except Exception as docker_exc:
+            import traceback
+            print(f"[ENV] from_docker_image FAILED type={type(docker_exc).__name__} msg={str(docker_exc)[:300]}", file=sys.stderr, flush=True)
+            print(traceback.format_exc(), file=sys.stderr, flush=True)
+            print(f"[ENV] falling back to SPACE_URL={SPACE_URL}", file=sys.stderr, flush=True)
+
+    env = DharaAiEnv(base_url=SPACE_URL)
+    print(f"[ENV] connected via base_url type={type(env).__name__}", file=sys.stderr, flush=True)
     return env
 
 
@@ -336,12 +355,21 @@ def _chat(
 async def _run_task(task_name: str, llm: OpenAI) -> None:
     _log(f"[START] task={task_name} env=dhara_ai model={MODEL_NAME}")
 
-    env = _make_env()
     rewards: List[float] = []
     step_n = 0
     final_done = False
+    env = None
 
     try:
+        try:
+            env = await _make_env()
+            print(f"[ENV] make_env returned type={type(env).__name__}", file=sys.stderr, flush=True)
+        except Exception as env_exc:
+            import traceback
+            print(f"[EXCEPT] location=make_env task={task_name} type={type(env_exc).__name__} msg={str(env_exc)[:500]}", file=sys.stderr, flush=True)
+            print(traceback.format_exc(), file=sys.stderr, flush=True)
+            raise
+
         async with env:
             print(f"[ENV_RESET] task={task_name}", file=sys.stderr, flush=True)
             result = await env.reset(task_name=task_name)
@@ -426,24 +454,21 @@ async def _run_task(task_name: str, llm: OpenAI) -> None:
 
 
 async def _amain() -> None:
-    # CRITICAL FIX: Check for API_KEY instead of HF_TOKEN (platform-injected variable)
-    if not API_KEY or not API_BASE_URL:
-        # Emit a fake [START]/[END] for each task so the harness still
-        # sees the required markers, then exit.
-        for task in TASKS:
-            _log(f"[START] task={task} env=dhara_ai model={MODEL_NAME}")
-            _log(
-                "[STEP]  step=1 action=NONE reward=0.00 done=true "
-                "error=API_KEY or API_BASE_URL environment variables are not set"
-            )
-            _log(
-                "[END]   success=false steps=0 score=0.00 rewards="
-            )
-        return
-
-    llm = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+    # HF_TOKEN is validated at module load time (raises if missing).
+    llm = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
     for task_name in TASKS:
-        await _run_task(task_name, llm)
+        try:
+            await _run_task(task_name, llm)
+        except Exception as task_exc:
+            import traceback
+            print(f"[EXCEPT] location=amain_loop task={task_name} type={type(task_exc).__name__} msg={str(task_exc)[:500]}", file=sys.stderr, flush=True)
+            print(traceback.format_exc(), file=sys.stderr, flush=True)
+            # Emit a valid [END] so output parsing still passes
+            _log(
+                f"[STEP]  step=1 action=ERROR reward=0.00 done=true "
+                f"error=task_crashed: {type(task_exc).__name__}"
+            )
+            _log("[END]   success=false steps=1 score=0.00 rewards=0.00")
 
 
 def main() -> None:

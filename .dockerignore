@@ -1,7 +1,8 @@
 .env
-.venv/
+.env.*
+*.env
 __pycache__/
-*.pyc
+.venv/
 .git/
 .gitignore
 tests/
